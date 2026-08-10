@@ -22,6 +22,8 @@
 [![Continuous Build NetBSD](https://github.com/aristocratos/btop/actions/workflows/continuous-build-netbsd.yml/badge.svg)](https://github.com/aristocratos/btop/actions/workflows/continuous-build-netbsd.yml)
 [![Continuous Build OpenBSD](https://github.com/aristocratos/btop/actions/workflows/continuous-build-openbsd.yml/badge.svg)](https://github.com/aristocratos/btop/actions/workflows/continuous-build-openbsd.yml)
 
+> **Fork notice:** this fork adds live Intel NPU monitoring on top of btop v1.4.6 — see [Intel NPU support](#intel-npu-support-this-fork).
+
 ## Index
 
 * [News](#news)
@@ -1553,3 +1555,64 @@ Options:
 ## LICENSE
 
 [Apache License 2.0](LICENSE)
+
+---
+
+## Intel NPU support (this fork)
+
+This fork adds live Intel NPU monitoring for Meteor Lake and newer (Intel Core
+Ultra) systems that expose the NPU through the `ivpu` driver
+(`/dev/accel/accel0`).
+
+### What you get
+
+A new entry in the GPU box, labeled **NPU**, showing:
+
+- utilization percentage with meter and graph
+- current NPU clock speed in MHz
+
+It reuses btop's existing GPU box machinery; on systems with both an iGPU and
+an NPU, they appear as separate entries in the same box.
+
+### How it works
+
+The NPU is read from the `ivpu` driver's sysfs interface:
+
+- `npu_busy_time_us` — cumulative busy time in microseconds; utilization is the
+  delta over the sample window, the same approach btop uses for other meters
+- `npu_current_frequency_mhz` / `npu_max_frequency_mhz` — clock speed
+
+The collector auto-disables when the sysfs files are absent (no Intel NPU,
+different vendor), so on other machines btop behaves exactly like upstream.
+
+### Building
+
+Same as upstream btop:
+
+```bash
+make -j
+sudo make install                # system-wide
+make install PREFIX=$HOME/.local # or user-local (no root)
+```
+
+Requires a C++23 compiler and CMake (see the upstream README). GPU support
+must be enabled — `GPU_SUPPORT=true`, the default on x86_64 Linux.
+
+### Enabling
+
+The NPU entry shows when the device is detected and `show_gpu_info` is not
+`"Off"`. The `shown_gpus` option accepts an `npu` token:
+
+```
+shown_gpus = "nvidia amd intel npu"   # default in this fork
+```
+
+Remove `npu` from the list to hide it.
+
+### Notes
+
+- The user needs read/write access to `/dev/accel/accel0`, normally via the
+  `render` group or a device ACL.
+- Forked from btop v1.4.6; the patch is 4 files (`src/linux/btop_collect.cpp`,
+  `src/btop_draw.cpp`, `src/btop_config.cpp`, `src/btop_menu.cpp`).
+- NPU support additions © 2026 artemisbunbun, Apache-2.0.

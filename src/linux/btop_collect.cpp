@@ -18,6 +18,7 @@ tab-size = 4
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -250,6 +251,17 @@ namespace Gpu {
 		template <bool is_init> bool collect(gpu_info* gpus_slice);
 		uint32_t device_count = 0;
 	}
+
+	//? Intel NPU data collection (via ivpu sysfs)
+	namespace Npu {
+		bool initialized = false;
+		bool init();
+		template <bool is_init> bool collect(gpu_info* gpus_slice);
+		uint32_t device_count = 0;
+
+		std::chrono::steady_clock::time_point last_sample{};
+		uint64_t last_busy_us = 0;
+	}
 #endif
 }
 
@@ -334,6 +346,10 @@ namespace Shared {
 
 		if (shown_gpus.contains("intel")) {
 			Gpu::Intel::init();
+		}
+
+		if (shown_gpus.contains("npu")) {
+			Gpu::Npu::init();
 		}
 
 		if (not Gpu::gpu_names.empty()) {
@@ -1897,6 +1913,79 @@ namespace Gpu {
 		}
 	}
 
+	namespace Npu {
+		//? Paths exposed by the ivpu (intel_vpu) kernel driver
+		static const fs::path accel_dir = "/sys/class/accel/accel0/device";
+
+		static auto read_u64(const fs::path& path) -> uint64_t {
+			std::ifstream file(path);
+			uint64_t value = 0;
+			if (file.good()) file >> value;
+			return value;
+		}
+
+		bool init() {
+			if (initialized) return false;
+
+			const auto busy_path = accel_dir / "npu_busy_time_us";
+			if (not fs::exists(busy_path)) {
+				Logger::debug("Failed to find NPU sysfs files, Intel NPU will not be detected");
+				return false;
+			}
+
+			device_count = 1;
+
+			gpus.resize(gpus.size() + device_count);
+			gpu_names.resize(gpus.size() + device_count);
+			gpu_names[Nvml::device_count + Rsmi::device_count + Intel::device_count] = "NPU (AI Boost)";
+
+			last_sample = std::chrono::steady_clock::now();
+			last_busy_us = read_u64(busy_path);
+
+			initialized = true;
+			Npu::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count + Intel::device_count);
+
+			return true;
+		}
+
+		template <bool is_init> bool collect(gpu_info* gpus_slice) {
+			if (!initialized) return false;
+
+			if constexpr(is_init) {
+				gpus_slice->supported_functions = {
+					.gpu_utilization = true,
+					.mem_utilization = false,
+					.gpu_clock = true,
+					.mem_clock = false,
+					.pwr_usage = false,
+					.pwr_state = false,
+					.temp_info = false,
+					.mem_total = false,
+					.mem_used = false,
+					.pcie_txrx = false,
+					.encoder_utilization = false,
+					.decoder_utilization = false
+				};
+			}
+
+			//? Utilization = delta of cumulative busy time over wall time
+			const auto now = std::chrono::steady_clock::now();
+			const uint64_t busy = read_u64(accel_dir / "npu_busy_time_us");
+			const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(now - last_sample).count();
+			long long percent = 0;
+			if (elapsed_us > 0 and busy >= last_busy_us)
+				percent = clamp((long long)((busy - last_busy_us) * 100 / (uint64_t)elapsed_us), 0ll, 100ll);
+			gpus_slice->gpu_percent.at("gpu-totals").push_back(percent);
+
+			last_busy_us = busy;
+			last_sample = now;
+
+			gpus_slice->gpu_clock_speed = (unsigned int)read_u64(accel_dir / "npu_current_frequency_mhz");
+
+			return true;
+		}
+	}
+
 	//? Collect data from GPU-specific libraries
 	auto collect(bool no_update) -> vector<gpu_info>& {
 		if (Runner::stopping or (no_update and not gpus.empty())) return gpus;
@@ -1907,6 +1996,7 @@ namespace Gpu {
 		Nvml::collect<0>(gpus.data()); // raw pointer to vector data, size == Nvml::device_count
 		Rsmi::collect<0>(gpus.data() + Nvml::device_count); // size = Rsmi::device_count
 		Intel::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count); // size = Intel::device_count
+		Npu::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count + Intel::device_count); // size = Npu::device_count
 
 		//* Calculate average usage
 		long long avg = 0;
